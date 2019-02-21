@@ -58,6 +58,8 @@ int main(int argc, char **argv)
             printf("%s\n", buffer);
             write(comm_socket, hello, strlen(hello));
         }
+
+        close(comm_socket);
     }
 
 
