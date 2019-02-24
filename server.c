@@ -5,6 +5,61 @@
 #include <string.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <stdbool.h>
+
+#include "server.h"
+#include "dyn_buffer.h"
+
+int pipe_fd[2];
+
+SERVER_ERR
+load_result(int fd, char **out)
+{
+    char c;
+    buffer res_buf;
+
+    IF_RET(buf_init(&res_buf) != BUF_SUCCESS, ERR_MEM);
+    read(fd, &c, 1);
+    buf_append(&res_buf, c);
+    while (c != '\n') {
+        read(fd, &c, 1);
+        buf_append(&res_buf, c);
+    }
+
+    *out = res_buf.data;
+    return SUCCESS;
+}
+
+SERVER_ERR
+get_cpu_name(char **res, int fd)
+{
+    SERVER_ERR ret = SUCCESS;
+
+    sys_com_to_stdin("grep -m 1 \"model name\" /proc/cpuinfo | cut -c 14-");
+    load_result(fd, res);
+
+}
+
+// char *
+// get_hostname()
+// {
+
+// }
+
+SERVER_ERR
+sys_com_to_stdin(char *command)
+{
+    pid_t pid = getpid();
+
+    buffer command_buffer;
+    IF_RET(buf_init(&command_buffer) != BUF_SUCCESS, ERR_MEM);
+    IF_RET(buf_concat(&command_buffer , command, strlen(command)) != BUF_SUCCESS, ERR_MEM);
+    IF_RET(buf_concat(&command_buffer, ">/proc/", 0) != BUF_SUCCESS, ERR_MEM);
+    IF_RET(buf_printf(&command_buffer, "%d", pid) != BUF_SUCCESS, ERR_MEM);
+    IF_RET(buf_concat(&command_buffer, "/fd/0\n", 0) != BUF_SUCCESS, ERR_MEM);
+    system(command_buffer.data);
+    return SUCCESS;
+}
 
 int main(int argc, char **argv)
 {
@@ -12,6 +67,15 @@ int main(int argc, char **argv)
     unsigned int client_len;
     char *endptr;
     struct sockaddr_in sa, sa_client;
+    char *cpu_name;
+
+    pipe(pipe_fd);
+    dup2(pipe_fd[1], 0);
+
+    get_cpu_name(&cpu_name, pipe_fd[0]);
+    printf("%s", cpu_name);
+
+    return 0;
 
     /* argument parsing */
     if (argc < 2) {
