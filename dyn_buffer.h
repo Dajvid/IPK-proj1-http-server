@@ -16,9 +16,11 @@ typedef enum {
     BUF_ERR_MEM,
 } BUF_ERR;
 
-BUF_ERR buf_init(buffer *buf);
+BUF_ERR buf_init(buffer *buf, size_t initial_size);
 bool buf_can_fit(buffer *buf, size_t len);
 BUF_ERR buf_concat(buffer *buf, char *data, size_t len);
 BUF_ERR buf_enlarge(buffer *buf);
 BUF_ERR buf_printf(buffer *buf, char *fstring, ...);
 BUF_ERR buf_append(buffer *buf, char c);
+void buf_flush(buffer *buf);
+void buf_destroy(buffer *buf);

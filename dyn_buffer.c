@@ -111,3 +111,9 @@ buf_printf(buffer *buf, char *fstring, ...)
 
     return BUF_SUCCESS;
 }
+
+void buf_flush(buffer *buf)
+{
+    buf->data[0] = '\0';
+    buf->used = 1;
+}
