@@ -3,19 +3,23 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdarg.h>
+#include <assert.h>
 
 #include "dyn_buffer.h"
 
 BUF_ERR
-buf_init(buffer *buf)
+buf_init(buffer *buf, size_t initial_size)
 {
-    buf->data = malloc(sizeof *buf->data * 2);
+    assert(buf);
+    assert(initial_size > 0);
+
+    buf->data = malloc(sizeof *buf->data * initial_size);
 
     if (!buf->data) {
         return BUF_ERR_MEM;
     }
 
-    buf->size = 2;
+    buf->size = initial_size;
     buf->used = 1;
     buf->data[0] = '\0';
 
@@ -31,6 +35,8 @@ buf_can_fit(buffer *buf, size_t len)
 BUF_ERR
 buf_concat(buffer *buf, char *data, size_t len)
 {
+    assert(buf);
+
     if (len == 0) {
         len = strlen(data);
     }
@@ -49,6 +55,8 @@ buf_concat(buffer *buf, char *data, size_t len)
 BUF_ERR
 buf_append(buffer *buf, char c)
 {
+    assert(buf);
+
     if (!buf_can_fit(buf, 1)) {
         if (buf_enlarge(buf) != BUF_SUCCESS) {
             return BUF_ERR_MEM;
@@ -64,6 +72,8 @@ buf_append(buffer *buf, char c)
 BUF_ERR
 buf_enlarge(buffer *buf)
 {
+    assert(buf);
+
     char *new_data = realloc(buf->data, buf->size * 2);
     if (!new_data) {
         return BUF_ERR_MEM;
@@ -78,6 +88,8 @@ buf_printf(buffer *buf, char *fstring, ...)
 {
     int printed = 0, free_size = 0;
     BUF_ERR ret = BUF_SUCCESS;
+
+    assert(buf);
 
 	va_list arguments;
 	va_start(arguments, fstring);
