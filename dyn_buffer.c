@@ -117,3 +117,8 @@ void buf_flush(buffer *buf)
     buf->data[0] = '\0';
     buf->used = 1;
 }
+
+void buf_destroy(buffer *buf)
+{
+    free(buf->data);
+}
