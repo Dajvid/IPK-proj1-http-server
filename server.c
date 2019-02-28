@@ -89,13 +89,24 @@ load_result(int fd, char **out)
 }
 
 SERVER_ERR
-get_cpu_name(char **res, int fd)
+get_cpu_name(char **res, int fd, RESPONSE_TYPE res_type)
 {
     SERVER_ERR ret = SUCCESS;
+    char *cpu_name;
+    buffer json_buf;
 
     ret = sys_com_to_stdin("grep -m 1 \"model name\" /proc/cpuinfo | cut -c 14-");
     IF_RET(ret != SUCCESS, ret);
-    load_result(fd, res);
+    load_result(fd, &cpu_name);
+
+    if (res_type == TYPE_APPLICATION_JSON) {
+        buf_init(&json_buf, 32);
+        buf_printf(&json_buf, "{cpu-name:%s}", cpu_name);
+        *res = json_buf.data;
+        free(cpu_name);
+    } else {
+        *res = cpu_name;
+    }
 
     return ret;
 }
@@ -103,9 +114,10 @@ get_cpu_name(char **res, int fd)
 SERVER_ERR
 load_header(int fd, char **out)
 {
-    char loaded, last_loaded = 0;
+    char *end_ptr, *content, loaded, last_loaded = 0;
+    int content_lenght = 0;
     SERVER_ERR ret = SUCCESS;
-    buffer header_buf;
+    buffer header_buf, tmp_buf;
 
     buf_init(&header_buf, 128);
     read(fd, &loaded, 1);
@@ -122,8 +134,19 @@ load_header(int fd, char **out)
         buf_append(&header_buf, loaded);
     }
 
-    char buffer[1024] = {0};
-    read(fd, buffer, 1024);
+    read(fd, &loaded, 1);
+    content = get_header_field_content(header_buf.data, "Content-Length", &content_lenght);
+    if (content_lenght != 0) {
+        buf_init(&tmp_buf, 16);
+        buf_concat(&tmp_buf, content, content_lenght);
+        content_lenght = strtol(tmp_buf.data, &end_ptr, 10);
+        buf_destroy(&tmp_buf);
+        if (end_ptr[0] != '\0') {
+            buf_destroy(&header_buf);
+            return ERR_BAD_REQ;
+        }
+        lseek(fd, content_lenght, SEEK_CUR);
+    }
 
     *out = header_buf.data;
     return SUCCESS;
@@ -154,11 +177,14 @@ int main(int argc, char **argv)
 {
     int port, server_socket, rc, comm_socket;
     unsigned int client_len;
-    char *endptr, *cpu_name;
+    char *endptr, *cpu_name, *header, *response_header, *response_payload, *response_header_fields;
     buffer msg;
     struct sockaddr_in sa, sa_client;
     PATH path;
     SERVER_ERR ret = SUCCESS;
+
+    pipe(pipe_fd);
+    dup2(pipe_fd[1], 0);
 
     /* argument parsing */
     if (argc < 2) {
@@ -194,21 +220,40 @@ int main(int argc, char **argv)
     /* busy waiting for client to connect */
     while (1) {
         comm_socket = accept(server_socket, (struct sockaddr *)&sa_client, &client_len);
-        printf("comm_socket - %d\n", comm_socket);
         if (comm_socket > 0) {
-            char *hello = "HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 10\n\nIt's alive";
+            response_header = OK_HEADER;
+            response_header_fields = NULL;
+            response_payload = NULL;
+            // char *hello = "HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 10\n\nIt's alive";
 
-            char *header = NULL;
             ret = load_header(comm_socket, &header);
             ret = parse_request_line(&header, &path);
-            if (ret)
+            if (ret == SUCCESS) {
+                response_header = OK_HEADER;
+
+                if (path == REQ_HOSTNAME) {
+
+                } else if (path == REQ_CPU_NAME) {
+                    get_cpu_name(&response_payload, pipe_fd[0], TYPE_TEXT_PLAIN);
+                    response_header_fields = "Content-Type: text/plain\nContent-Length: 40\n\n";
+                } else if (path == REQ_LOAD) {
+
+                }
+
+            } else if (ret == ERR_BAD_METHOD) {
+                response_header = BAD_REQUEST_HEADER;
+            } /*else if (ret == )*/
             printf("%s\n", header);
-            write(comm_socket, NOT_FOUND_HEADER, strlen(NOT_FOUND_HEADER));
+            if (response_header != NULL)
+            write(comm_socket, response_header, strlen(response_header));
+            if (response_header_fields != NULL)
+            write(comm_socket, response_header_fields, strlen(response_header_fields));
+            if (response_payload != NULL)
+            write(comm_socket, response_payload, strlen(response_payload));
         }
 
         close(comm_socket);
     }
-
 
     return EXIT_SUCCESS;
 }

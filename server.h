@@ -26,6 +26,7 @@ typedef enum {
 
 #define NOT_FOUND_HEADER "HTTP/1.1 404 Not Found\n\n"
 #define BAD_REQUEST_HEADER "HTTP/1.1 400 Bad Request\n\n"
+#define OK_HEADER "HTTP/1.1 200 OK\n"
 
 /**
  * @brief Macro to simplify check of returned values, returns ret if condition cond isn't met.
