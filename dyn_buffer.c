@@ -47,7 +47,7 @@ buf_concat(buffer *buf, char *data, size_t len)
         }
     }
 
-    strcat(buf->data, data);
+    strncat(buf->data, data, len);
     buf->used += len;
     return BUF_SUCCESS;
 }
