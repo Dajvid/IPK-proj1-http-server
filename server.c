@@ -12,18 +12,76 @@
 
 int pipe_fd[2];
 
+char *
+get_header_field_content(char *header, char *field, int *length)
+{
+    char *iter, *found;
+    *length = 0;
+    buffer temp;
+
+    buf_init(&temp, 16);
+    buf_append(&temp, '\n');
+    buf_concat(&temp, field, strlen(field));
+    found = strstr(header, temp.data);
+
+    if (found) {
+        found = &found[strlen(field) + 3];
+        iter = found;
+        while (*iter != '\n') {
+            (*length)++;
+            iter++;
+        }
+    }
+
+    buf_destroy(&temp);
+    return found;
+}
+
+SERVER_ERR
+parse_request_line(char **header_ptr, PATH *requested_path)
+{
+    buffer temp;
+
+    buf_init(&temp, 16);
+
+    if (strncmp(*header_ptr, "GET ", 4) != 0) {
+        return ERR_BAD_METHOD;
+    }
+
+    *header_ptr = &((*header_ptr)[4]);
+    if (strncmp(*header_ptr, "/hostname ", 10) == 0) {
+        *requested_path = REQ_HOSTNAME;
+        *header_ptr = &((*header_ptr)[10]);
+    } else if (strncmp(*header_ptr, "/cpu-name ", 10) == 0) {
+        *requested_path = REQ_CPU_NAME;
+        *header_ptr = &((*header_ptr)[10]);
+    } else if (strncmp(*header_ptr, "/load ", 6) == 0) {
+        *requested_path = REQ_LOAD;
+        *header_ptr = &((*header_ptr)[6]);
+    } else {
+        *requested_path = REQ_UNKNOWN;
+        return ERR_BAD_PATH;
+    }
+
+    if (strncmp(*header_ptr, "HTTP/1.1\r\n", 10) == 0 || strncmp(*header_ptr, "HTTP/1.0\r\n", 10) == 0) {
+        *header_ptr = &((*header_ptr)[10]);
+        return SUCCESS;
+    } else {
+        return ERR_BAD_VERSION;
+    }
+}
+
 SERVER_ERR
 load_result(int fd, char **out)
 {
     char c;
     buffer res_buf;
 
-    IF_RET(buf_init(&res_buf) != BUF_SUCCESS, ERR_MEM);
+    IF_RET(buf_init(&res_buf, 64) != BUF_SUCCESS, ERR_MEM);
     read(fd, &c, 1);
-    buf_append(&res_buf, c);
     while (c != '\n') {
-        read(fd, &c, 1);
         buf_append(&res_buf, c);
+        read(fd, &c, 1);
     }
 
     *out = res_buf.data;
@@ -35,9 +93,40 @@ get_cpu_name(char **res, int fd)
 {
     SERVER_ERR ret = SUCCESS;
 
-    sys_com_to_stdin("grep -m 1 \"model name\" /proc/cpuinfo | cut -c 14-");
+    ret = sys_com_to_stdin("grep -m 1 \"model name\" /proc/cpuinfo | cut -c 14-");
+    IF_RET(ret != SUCCESS, ret);
     load_result(fd, res);
 
+    return ret;
+}
+
+SERVER_ERR
+load_header(int fd, char **out)
+{
+    char loaded, last_loaded = 0;
+    SERVER_ERR ret = SUCCESS;
+    buffer header_buf;
+
+    buf_init(&header_buf, 128);
+    read(fd, &loaded, 1);
+    buf_append(&header_buf, loaded);
+
+    while (loaded != '\r' || last_loaded != '\n') {
+        if (loaded == 0) {
+            buf_destroy(&header_buf);
+            return ERR_BAD_REQ;
+        }
+
+        last_loaded = loaded;
+        read(fd, &loaded, 1);
+        buf_append(&header_buf, loaded);
+    }
+
+    char buffer[1024] = {0};
+    read(fd, buffer, 1024);
+
+    *out = header_buf.data;
+    return SUCCESS;
 }
 
 // char *
@@ -52,7 +141,7 @@ sys_com_to_stdin(char *command)
     pid_t pid = getpid();
 
     buffer command_buffer;
-    IF_RET(buf_init(&command_buffer) != BUF_SUCCESS, ERR_MEM);
+    IF_RET(buf_init(&command_buffer, 64) != BUF_SUCCESS, ERR_MEM);
     IF_RET(buf_concat(&command_buffer , command, strlen(command)) != BUF_SUCCESS, ERR_MEM);
     IF_RET(buf_concat(&command_buffer, ">/proc/", 0) != BUF_SUCCESS, ERR_MEM);
     IF_RET(buf_printf(&command_buffer, "%d", pid) != BUF_SUCCESS, ERR_MEM);
@@ -65,28 +154,20 @@ int main(int argc, char **argv)
 {
     int port, server_socket, rc, comm_socket;
     unsigned int client_len;
-    char *endptr;
+    char *endptr, *cpu_name;
+    buffer msg;
     struct sockaddr_in sa, sa_client;
-    char *cpu_name;
-
-    pipe(pipe_fd);
-    dup2(pipe_fd[1], 0);
-
-    get_cpu_name(&cpu_name, pipe_fd[0]);
-    printf("%s", cpu_name);
-
-    return 0;
+    PATH path;
+    SERVER_ERR ret = SUCCESS;
 
     /* argument parsing */
     if (argc < 2) {
         fprintf(stderr, "No port number specified.\n");
         return EXIT_FAILURE;
     }
-
     port = strtol(argv[1], &endptr, 10);
-
     if (*endptr != '\0') {
-        fprintf(stderr, "Port number must be specified as integer %s id not an integer\n", argv[1]);
+        fprintf(stderr, "Port number must be specified as integer %s is not an integer\n", argv[1]);
         return EXIT_FAILURE;
     }
 
@@ -96,31 +177,33 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     printf("%d\n", port);
-
     memset((char *)&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_ANY);
     sa.sin_port = htons(port);
-
     if ((rc = bind(server_socket, (const struct sockaddr *)&sa, sizeof(sa))) < 0) {
         perror("ERROR: bind");
         return(EXIT_FAILURE);
     }
-
     if (listen(server_socket, 1) < 0) {
         perror("ERROR: listen");
         return(EXIT_FAILURE);
     }
 
+    buf_init(&msg, 128);
+    /* busy waiting for client to connect */
     while (1) {
         comm_socket = accept(server_socket, (struct sockaddr *)&sa_client, &client_len);
         printf("comm_socket - %d\n", comm_socket);
         if (comm_socket > 0) {
             char *hello = "HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 10\n\nIt's alive";
-            char buffer[1024] = {0};
-            read(comm_socket , buffer, 1024);
-            printf("%s\n", buffer);
-            write(comm_socket, hello, strlen(hello));
+
+            char *header = NULL;
+            ret = load_header(comm_socket, &header);
+            ret = parse_request_line(&header, &path);
+            if (ret)
+            printf("%s\n", header);
+            write(comm_socket, NOT_FOUND_HEADER, strlen(NOT_FOUND_HEADER));
         }
 
         close(comm_socket);
