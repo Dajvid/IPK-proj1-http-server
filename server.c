@@ -10,8 +10,6 @@
 #include "server.h"
 #include "dyn_buffer.h"
 
-int pipe_fd[2];
-
 char *
 get_header_field_content(char *header, char *field, int *length)
 {
@@ -130,6 +128,29 @@ get_cpu_name(char **res, int fd, RESPONSE_TYPE res_type)
 }
 
 SERVER_ERR
+get_hostname(char **res, int fd, RESPONSE_TYPE res_type)
+{
+    SERVER_ERR ret = SUCCESS;
+    char *hostname;
+    buffer json_buf;
+
+    ret = sys_com_to_stdin("uname -n");
+    IF_RET(ret != SUCCESS, ret);
+    load_result(fd, &hostname);
+
+    if (res_type == TYPE_APPLICATION_JSON) {
+        buf_init(&json_buf, 32);
+        buf_printf(&json_buf, "{\"hostname\":\"%s\"}", hostname);
+        *res = json_buf.data;
+        free(hostname);
+    } else {
+        *res = hostname;
+    }
+
+    return ret;
+}
+
+SERVER_ERR
 load_header(int fd, char **out)
 {
     char *end_ptr, *content, loaded, last_loaded = 0;
@@ -170,12 +191,6 @@ load_header(int fd, char **out)
     return SUCCESS;
 }
 
-// char *
-// get_hostname()
-// {
-
-// }
-
 SERVER_ERR
 sys_com_to_stdin(char *command)
 {
@@ -193,9 +208,9 @@ sys_com_to_stdin(char *command)
 
 int main(int argc, char **argv)
 {
-    int port, server_socket, rc, comm_socket;
+    int port, server_socket, rc, comm_socket, pipe_fd[2];
     unsigned int client_len;
-    char *endptr, *cpu_name, *header;
+    char *endptr, *cpu_name, *header, *hostname;
     buffer response_header, response_payload, response_header_fields;
     struct sockaddr_in sa, sa_client;
     PATH path;
@@ -241,6 +256,7 @@ int main(int argc, char **argv)
     /* busy waiting for client to connect */
     while (1) {
         comm_socket = accept(server_socket, (struct sockaddr *)&sa_client, &client_len);
+
         if (comm_socket > 0) {
             buf_flush(&response_header);
             buf_flush(&response_header_fields);
@@ -249,31 +265,41 @@ int main(int argc, char **argv)
 
             ret = load_header(comm_socket, &header);
             ret = parse_request_line(&header, &path);
+
+            /* asemble response */
+            /* request line is valid, send OK respons with corresponding payload */
             if (ret == SUCCESS) {
                 response_type = get_response_type(header);
                 buf_concat(&response_header, OK_HEADER, strlen(OK_HEADER));
 
                 if (path == REQ_HOSTNAME) {
-
+                    get_hostname(&hostname, pipe_fd[0], response_type);
+                    buf_concat(&response_payload, hostname, 0);
                 } else if (path == REQ_CPU_NAME) {
                     get_cpu_name(&cpu_name, pipe_fd[0], response_type);
                     buf_concat(&response_payload, cpu_name, 0);
-                    buf_printf(&response_header_fields, "Content-Type: %s\nContent-Length: %d\n\n", RESPONSE_TYPE_STRING[response_type], buf_get_len(&response_payload));
                 } else if (path == REQ_LOAD) {
 
                 }
+                buf_printf(&response_header_fields, "Content-Type: %s\nContent-Length: %d\n\n",
+                           RESPONSE_TYPE_STRING[response_type], buf_get_len(&response_payload));
 
+            /* request uses unsupported or unknown method */
             } else if (ret == ERR_BAD_METHOD) {
                 buf_concat(&response_header, BAD_REQUEST_HEADER, strlen(BAD_REQUEST_HEADER));
+
+            /* request requires invalid path */
             } else if (ret == ERR_BAD_PATH) {
                 buf_concat(&response_header, NOT_FOUND_HEADER, strlen(NOT_FOUND_HEADER));
+            } else if (ret == ERR_BAD_REQ || ret == ERR_BAD_REQ) {
+                buf_concat(&response_header, BAD_REQUEST_HEADER, strlen(BAD_REQUEST_HEADER));
             }
-            printf("%s\n", header);
-            write(comm_socket, response_header.data, buf_get_len(&response_header));
-            write(comm_socket, response_header_fields.data, buf_get_len(&response_header_fields));
-            write(comm_socket, response_payload.data, buf_get_len(&response_payload));
-        }
 
+            /* send response */
+            write(comm_socket, buf_get_data(&response_header), buf_get_len(&response_header));
+            write(comm_socket, buf_get_data(&response_header_fields), buf_get_len(&response_header_fields));
+            write(comm_socket, buf_get_data(&response_payload), buf_get_len(&response_payload));
+        }
         close(comm_socket);
     }
 
