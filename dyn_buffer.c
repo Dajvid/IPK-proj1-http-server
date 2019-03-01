@@ -142,3 +142,9 @@ buf_get_len(buffer *buf)
 {
     return buf->used - 1;
 }
+
+char
+*buf_get_data(buffer *buf)
+{
+    return buf->data;
+}
