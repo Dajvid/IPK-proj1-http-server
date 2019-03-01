@@ -124,13 +124,21 @@ buf_printf(buffer *buf, char *fstring, ...)
     return BUF_SUCCESS;
 }
 
-void buf_flush(buffer *buf)
+void
+buf_flush(buffer *buf)
 {
     buf->data[0] = '\0';
     buf->used = 1;
 }
 
-void buf_destroy(buffer *buf)
+void
+buf_destroy(buffer *buf)
 {
     free(buf->data);
+}
+
+size_t
+buf_get_len(buffer *buf)
+{
+    return buf->used - 1;
 }

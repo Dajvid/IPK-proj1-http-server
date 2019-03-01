@@ -13,9 +13,14 @@ typedef enum {
 } SERVER_ERR;
 
 typedef enum {
-    TYPE_TEXT_PLAIN,                       /**< Response is requested in plain text (default option) */
-    TYPE_APPLICATION_JSON,                 /**< Response is requested in json */
+    TYPE_TEXT_PLAIN         = 0,           /**< Response is requested in plain text (default option) */
+    TYPE_APPLICATION_JSON   = 1,           /**< Response is requested in json */
 } RESPONSE_TYPE;
+
+static const char *RESPONSE_TYPE_STRING[2] = {
+    "text/plain",
+    "application/json",
+};
 
 typedef enum {
     REQ_UNKNOWN,                           /**< Unknown path */

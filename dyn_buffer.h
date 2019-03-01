@@ -24,3 +24,4 @@ BUF_ERR buf_printf(buffer *buf, char *fstring, ...);
 BUF_ERR buf_append(buffer *buf, char c);
 void buf_flush(buffer *buf);
 void buf_destroy(buffer *buf);
+size_t buf_get_len(buffer *buf);
