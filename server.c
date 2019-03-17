@@ -370,7 +370,6 @@ serve_client(int client_fd, int in_fd)
         buf_concat(&whole_response_buf, buf_get_data(&response_header_fields), buf_get_len(&response_header_fields));
         buf_concat(&whole_response_buf, buf_get_data(&response_payload), buf_get_len(&response_payload));
 
-        printf("%s", whole_response_buf.data);
         writen_len = write(client_fd, buf_get_data(&whole_response_buf), buf_get_len(&whole_response_buf));
         if (writen_len == -1) {
             ret = ERR_UNABLE_TO_RESPOND;
