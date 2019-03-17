@@ -266,9 +266,10 @@ void terminate_handler() {
 int main(int argc, char **argv)
 {
     int port, server_socket, rc, comm_socket, pipe_fd[2], host_len;
+    bool started = false;
     long long int ref_time;
     unsigned int client_len;
-    char *endptr, *cpu_name, *header, *hostname, *cpu_load, *host, *header_start;
+    char *endptr = NULL, *cpu_name = NULL, *header = NULL, *hostname = NULL, *cpu_load = NULL, *host = NULL, *header_start = NULL;
     buffer response_header, response_payload, response_header_fields;
     struct sockaddr_in sa, sa_client;
     PATH path;
@@ -314,16 +315,13 @@ int main(int argc, char **argv)
     signal(SIGINT, terminate_handler);
     /* busy waiting for client to connect */
     while (!terminate) {
+        client_len = sizeof(sa_client);
         comm_socket = accept(server_socket, (struct sockaddr *)&sa_client, &client_len);
-
+        started = true;
         if (comm_socket > 0) {
             buf_flush(&response_header);
             buf_flush(&response_header_fields);
             buf_flush(&response_payload);
-            hostname = NULL;
-            cpu_name = NULL;
-            cpu_load = NULL;
-            header_start = NULL;
 
             ret = load_header(comm_socket, &header);
             header_start = header;
@@ -372,13 +370,19 @@ int main(int argc, char **argv)
 
             /* free resources */
             free(header_start);
+            header_start = NULL;
             free(hostname);
+            hostname = NULL;
             free(cpu_name);
+            cpu_name = NULL;
             free(cpu_load);
+            cpu_load = NULL;
         }
-        close(comm_socket);
+        if (started) {
+            close(comm_socket);
+            started = false;
+        }
     }
-    close(pipe_fd[1]);
     close(pipe_fd[0]);
     close(server_socket);
     buf_destroy(&response_header);
