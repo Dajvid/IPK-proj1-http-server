@@ -8,17 +8,27 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <time.h>
 
 /* enumeration of server error codes */
 typedef enum {
     SUCCESS = EXIT_SUCCESS,                /**< Operation was succesful */
     ERR_MEM,                               /**< Error in memory allocation */
-    ERR_INT,                                /**< Internal error */
+    ERR_INT,                               /**< Internal error */
     ERR_BAD_REQ,                           /**< Invalid request */
     ERR_BAD_METHOD,                        /**< Unsupported or unknown request method */
     ERR_BAD_VERSION,                       /**< Unknown HTTP version */
     ERR_BAD_PATH,                          /**< Unknown path */
+    ERR_UNABLE_TO_RESPOND,
+    CLOSE,
 } SERVER_ERR;
+
+typedef enum {
+    HTTP10,
+    HTTP11,
+} HTTP_VERSION;
 
 typedef enum {
     TYPE_TEXT_PLAIN         = 0,           /**< Response is requested in plain text (default option) */
@@ -55,7 +65,7 @@ typedef enum {
 #define NOT_FOUND_HEADER "HTTP/1.1 404 Not Found\n\n"
 #define BAD_REQUEST_HEADER "HTTP/1.1 400 Bad Request\n\n"
 #define OK_HEADER "HTTP/1.1 200 OK\n"
-
+#define DEFULT_TIMEOUT 5
 /**
  * @brief Macro to simplify check of returned values, returns ret if condition cond isn't met.
  *
@@ -63,6 +73,16 @@ typedef enum {
  * @param[in] ret Value that is returned if condition is evalued as false
  */
 #define IF_RET(cond, ret) {if (cond) {return ret;}}
-
+#define IF_GOTO(cond, label) {if (cond) {goto label;}}
 SERVER_ERR sys_com_to_stdin(char *command);
 SERVER_ERR load_result(int fd, char **out);
+char *get_header_field_content(char *header, char *field, int *length);
+RESPONSE_TYPE get_response_type(char *header);
+SERVER_ERR parse_request_line(char **header_ptr, PATH *requested_path, long long int *ref_time);
+SERVER_ERR get_cpu_name(char **res, int fd, RESPONSE_TYPE res_type);
+SERVER_ERR get_hostname(char **res, int fd, RESPONSE_TYPE res_type);
+SERVER_ERR parse_idle(int fd, long double *idle, long double *non_idle);
+SERVER_ERR get_cpu_usage(char **res, int fd, RESPONSE_TYPE res_type);
+SERVER_ERR load_header(int fd, char **out);
+SERVER_ERR serve_client(int client_fd, int in_fd);
+bool iskeep_alive(char *header);

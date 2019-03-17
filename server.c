@@ -259,22 +259,124 @@ sys_com_to_stdin(char *command)
     return SUCCESS;
 }
 
-void terminate_handler() {
+void
+terminate_handler() {
     terminate = true;
 }
 
-int main(int argc, char **argv)
+void
+unexpectedly_closed_handler() {
+    fprintf(stderr, "WARNING: client closed connection unexpectedly\n");
+}
+
+SERVER_ERR
+server_client(int client_fd, int in_fd)
 {
-    int port, server_socket, rc, comm_socket, pipe_fd[2], host_len;
-    bool started = false;
-    long long int ref_time;
-    unsigned int client_len;
-    char *endptr = NULL, *cpu_name = NULL, *header = NULL, *hostname = NULL, *cpu_load = NULL, *host = NULL, *header_start = NULL;
-    buffer response_header, response_payload, response_header_fields;
-    struct sockaddr_in sa, sa_client;
-    PATH path;
+    char *cpu_name = NULL, *header = NULL, *hostname = NULL, *cpu_load = NULL, *host = NULL, *header_start = NULL;
+    buffer response_header, response_payload, response_header_fields, whole_response_buf;
     SERVER_ERR ret = SUCCESS;
+    long long int ref_time;
+    PATH path = REQ_UNKNOWN;
     RESPONSE_TYPE response_type = TYPE_TEXT_PLAIN;
+    int host_len = 0;
+    ssize_t writen_len;
+
+    buf_init(&response_header, 64);
+    buf_init(&response_payload, 64);
+    buf_init(&response_header_fields, 64);
+    buf_init(&whole_response_buf, 256);
+
+    if (client_fd > 0) {
+        buf_flush(&response_header);
+        buf_flush(&response_header_fields);
+        buf_flush(&response_payload);
+
+        ret = load_header(client_fd, &header);
+        IF_GOTO(ret != SUCCESS, cleanup);
+        header_start = header;
+        ret = parse_request_line(&header, &path, &ref_time);
+
+        /* asemble response */
+        /* request line is valid, send OK respons with corresponding payload */
+        if (ret == SUCCESS) {
+            response_type = get_response_type(header);
+            buf_concat(&response_header, OK_HEADER, 0);
+
+            if (path == REQ_HOSTNAME) {
+                get_hostname(&hostname, in_fd, response_type);
+                buf_concat(&response_payload, hostname, 0);
+            } else if (path == REQ_CPU_NAME) {
+                get_cpu_name(&cpu_name, in_fd, response_type);
+                buf_concat(&response_payload, cpu_name, 0);
+            } else if (path == REQ_LOAD) {
+                get_cpu_usage(&cpu_load, in_fd, response_type);
+                buf_concat(&response_payload, cpu_load, 0);
+                if (ref_time >= 0) {
+                    host = get_header_field_content(header, "Host", &host_len);
+                    buf_printf(&response_header_fields, "Refresh: %lli; url=http://", ref_time);
+                    buf_concat(&response_header_fields, host, host_len);
+                    buf_printf(&response_header_fields, "/load?refresh=%lli\r\n", ref_time);
+                }
+            }
+            buf_printf(&response_header_fields, "Content-Type: %s\nContent-Length: %d\r\n\r\n",
+                        RESPONSE_TYPE_STRING[response_type], buf_get_len(&response_payload));
+
+        /* request uses unsupported or unknown method */
+        } else if (ret == ERR_BAD_METHOD) {
+            buf_concat(&response_header, BAD_REQUEST_HEADER, 0);
+
+        /* request requires invalid path */
+        } else if (ret == ERR_BAD_PATH) {
+            buf_concat(&response_header, NOT_FOUND_HEADER, 0);
+        } else if (ret == ERR_BAD_REQ || ret == ERR_BAD_REQ) {
+            buf_concat(&response_header, BAD_REQUEST_HEADER, 0);
+        }
+
+        /* send response at once */
+        buf_concat(&whole_response_buf, buf_get_data(&response_header), buf_get_len(&response_header));
+        buf_concat(&whole_response_buf, buf_get_data(&response_header_fields), buf_get_len(&response_header_fields));
+        buf_concat(&whole_response_buf, buf_get_data(&response_payload), buf_get_len(&response_payload));
+
+        writen_len = write(client_fd, buf_get_data(&whole_response_buf), buf_get_len(&whole_response_buf));
+        if (writen_len == -1) {
+            ret = ERR_UNABLE_TO_RESPOND;
+        } else {
+            ret = SUCCESS;
+        }
+
+        /* free resources */
+        free(header_start);
+        header_start = NULL;
+        free(hostname);
+        hostname = NULL;
+        free(cpu_name);
+        cpu_name = NULL;
+        free(cpu_load);
+        cpu_load = NULL;
+    }
+
+cleanup:
+    buf_destroy(&response_header);
+    buf_destroy(&response_header_fields);
+    buf_destroy(&response_payload);
+    buf_destroy(&whole_response_buf);
+
+    return ret;
+}
+
+
+int
+main(int argc, char **argv)
+{
+    int port, rc, server_socket, pipe_fd[2];
+    unsigned int client_len;
+    char *endptr = NULL;
+    struct sockaddr_in sa, sa_client;
+    SERVER_ERR ret = SUCCESS;
+    fd_set active_fd_set, read_fd_set;
+    int enable = 1, ret_int = 0;
+    bool timeouted[FD_SETSIZE] = {};
+    struct timeval timeout;
 
     pipe(pipe_fd);
     dup2(pipe_fd[1], 0);
@@ -295,6 +397,12 @@ int main(int argc, char **argv)
         perror("ERROR in socket");
         return EXIT_FAILURE;
     }
+
+    if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
+        perror("ERROR: in setsockopt");
+        return EXIT_FAILURE;
+    }
+
     memset((char *)&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -308,86 +416,70 @@ int main(int argc, char **argv)
         return(EXIT_FAILURE);
     }
 
-    buf_init(&response_header, 64);
-    buf_init(&response_payload, 64);
-    buf_init(&response_header_fields, 64);
+    FD_ZERO(&active_fd_set);
+    FD_SET(server_socket, &active_fd_set);
 
+    /* set signal interceptors */
     signal(SIGINT, terminate_handler);
+    signal(SIGPIPE, unexpectedly_closed_handler);
+    /* set initial timeout value */
+    timeout.tv_sec = DEFULT_TIMEOUT;
+    timeout.tv_usec = 0;
     /* busy waiting for client to connect */
     while (!terminate) {
-        client_len = sizeof(sa_client);
-        comm_socket = accept(server_socket, (struct sockaddr *)&sa_client, &client_len);
-        started = true;
-        if (comm_socket > 0) {
-            buf_flush(&response_header);
-            buf_flush(&response_header_fields);
-            buf_flush(&response_payload);
-
-            ret = load_header(comm_socket, &header);
-            header_start = header;
-            ret = parse_request_line(&header, &path, &ref_time);
-
-            /* asemble response */
-            /* request line is valid, send OK respons with corresponding payload */
-            if (ret == SUCCESS) {
-                response_type = get_response_type(header);
-                buf_concat(&response_header, OK_HEADER, 0);
-
-                if (path == REQ_HOSTNAME) {
-                    get_hostname(&hostname, pipe_fd[0], response_type);
-                    buf_concat(&response_payload, hostname, 0);
-                } else if (path == REQ_CPU_NAME) {
-                    get_cpu_name(&cpu_name, pipe_fd[0], response_type);
-                    buf_concat(&response_payload, cpu_name, 0);
-                } else if (path == REQ_LOAD) {
-                    get_cpu_usage(&cpu_load, pipe_fd[0], response_type);
-                    buf_concat(&response_payload, cpu_load, 0);
-                    if (ref_time >= 0) {
-                        host = get_header_field_content(header, "Host", &host_len);
-                        buf_printf(&response_header_fields, "Refresh: %lli; url=http://", ref_time);
-                        buf_concat(&response_header_fields, host, host_len);
-                        buf_printf(&response_header_fields, "/load?refresh=%lli\r\n", ref_time);
+        /* reinitialize fd set */
+        read_fd_set = active_fd_set;
+        /* TODO add timeout */
+        ret_int = select(FD_SETSIZE, &read_fd_set, NULL, NULL, &timeout);
+        if (ret_int < 0 && !terminate) {
+            perror("ERROR: select");
+            return EXIT_FAILURE;
+        }
+        if (!terminate) {
+            if (ret_int == 0) {
+                for (int i = 0; i < FD_SETSIZE; i++) {
+                    if (FD_ISSET(i, &active_fd_set)) {
+                        if (timeouted[i]) {
+                            close(i);
+                            FD_CLR(i, &active_fd_set);
+                        } else {
+                            timeouted[i] = true;
+                            timeout.tv_sec = DEFULT_TIMEOUT;
+                            timeout.tv_usec = 0;
+                        }
                     }
                 }
-                buf_printf(&response_header_fields, "Content-Type: %s\nContent-Length: %d\r\n\r\n",
-                           RESPONSE_TYPE_STRING[response_type], buf_get_len(&response_payload));
-
-            /* request uses unsupported or unknown method */
-            } else if (ret == ERR_BAD_METHOD) {
-                buf_concat(&response_header, BAD_REQUEST_HEADER, 0);
-
-            /* request requires invalid path */
-            } else if (ret == ERR_BAD_PATH) {
-                buf_concat(&response_header, NOT_FOUND_HEADER, 0);
-            } else if (ret == ERR_BAD_REQ || ret == ERR_BAD_REQ) {
-                buf_concat(&response_header, BAD_REQUEST_HEADER, 0);
+            } else {
+                for (int i = 0; i < FD_SETSIZE; i++) {
+                    if (FD_ISSET(i, &read_fd_set)) {
+                        /* request for new connection */
+                        if (i == server_socket) {
+                            int new_socket;
+                            client_len = sizeof(sa_client);
+                            new_socket = accept(server_socket, (struct sockaddr *)&sa_client, &client_len);
+                            if (new_socket < 0) {
+                                perror("ERROR: accept");
+                            }
+                            FD_SET(new_socket, &active_fd_set);
+                        /* new request from connected client or timeout */
+                        } else {
+                            ret = server_client(i, pipe_fd[0]);
+                            if (ret == ERR_UNABLE_TO_RESPOND) {
+                                close(i);
+                                FD_CLR(i, &active_fd_set);
+                            }
+                        }
+                    }
+                }
             }
-
-            /* send response */
-            write(comm_socket, buf_get_data(&response_header), buf_get_len(&response_header));
-            write(comm_socket, buf_get_data(&response_header_fields), buf_get_len(&response_header_fields));
-            write(comm_socket, buf_get_data(&response_payload), buf_get_len(&response_payload));
-
-            /* free resources */
-            free(header_start);
-            header_start = NULL;
-            free(hostname);
-            hostname = NULL;
-            free(cpu_name);
-            cpu_name = NULL;
-            free(cpu_load);
-            cpu_load = NULL;
-        }
-        if (started) {
-            close(comm_socket);
-            started = false;
         }
     }
     close(pipe_fd[0]);
-    close(server_socket);
-    buf_destroy(&response_header);
-    buf_destroy(&response_header_fields);
-    buf_destroy(&response_payload);
+    for (int i = 0; i < FD_SETSIZE; i++) {
+        if (FD_ISSET(i, &active_fd_set)) {
+            close(i);
+        }
+    }
 
     return EXIT_SUCCESS;
 }
