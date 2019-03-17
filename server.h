@@ -33,6 +33,7 @@ typedef enum {
 typedef enum {
     TYPE_TEXT_PLAIN         = 0,           /**< Response is requested in plain text (default option) */
     TYPE_APPLICATION_JSON   = 1,           /**< Response is requested in json */
+    TYPE_UNSUPPORTED        = 3,
 } RESPONSE_TYPE;
 
 static const char *RESPONSE_TYPE_STRING[2] = {
@@ -62,9 +63,10 @@ typedef enum {
     GUEST_NICE_IDLE         = 9,
 } IDLE_NAMES;
 
-#define NOT_FOUND_HEADER "HTTP/1.1 404 Not Found\n\n"
-#define BAD_REQUEST_HEADER "HTTP/1.1 400 Bad Request\n\n"
-#define OK_HEADER "HTTP/1.1 200 OK\n"
+#define NOT_FOUND_HEADER "HTTP/1.1 404 Not Found\r\n\r\n"
+#define BAD_REQUEST_HEADER "HTTP/1.1 400 Bad Request\r\n\r\n"
+#define OK_HEADER "HTTP/1.1 200 OK\r\n"
+#define BAD_TYPE_HEADER "HTTP/1.1 406 Not Acceptable\r\n\r\n"
 #define DEFULT_TIMEOUT 5
 /**
  * @brief Macro to simplify check of returned values, returns ret if condition cond isn't met.
@@ -78,7 +80,7 @@ SERVER_ERR sys_com_to_stdin(char *command);
 SERVER_ERR load_result(int fd, char **out);
 char *get_header_field_content(char *header, char *field, int *length);
 RESPONSE_TYPE get_response_type(char *header);
-SERVER_ERR parse_request_line(char **header_ptr, PATH *requested_path, long long int *ref_time);
+SERVER_ERR parse_request_line(char **header_ptr, PATH *requested_path, long long int *ref_time, HTTP_VERSION *version);
 SERVER_ERR get_cpu_name(char **res, int fd, RESPONSE_TYPE res_type);
 SERVER_ERR get_hostname(char **res, int fd, RESPONSE_TYPE res_type);
 SERVER_ERR parse_idle(int fd, long double *idle, long double *non_idle);

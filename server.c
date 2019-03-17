@@ -31,21 +31,28 @@ get_response_type(char *header)
 {
     int field_len = 0;
     char *field = NULL;
-
+    buffer tmp;
     field = get_header_field_content(header, "Content-Type", &field_len);
 
     if (field_len == 0) {
         return TYPE_TEXT_PLAIN;
     }
-    if (strncmp("application/json", field, field_len) == 0) {
+
+    buf_init(&tmp, 64);
+    buf_concat(&tmp, field, field_len);
+
+    if (strstr("text/html,", tmp.data) || strstr("text/html\r\n", tmp.data) || strstr("*/*", tmp.data) || strstr("*/*\r\n", tmp.data)) {
+        return TYPE_TEXT_PLAIN;
+    }
+    if (strstr("application/json,", tmp.data) || strstr("application/json\r\n", tmp.data)) {
         return TYPE_APPLICATION_JSON;
     } else {
-        return TYPE_TEXT_PLAIN;
+        return TYPE_UNSUPPORTED;
     }
 }
 
 SERVER_ERR
-parse_request_line(char **header_ptr, PATH *requested_path, long long int *ref_time)
+parse_request_line(char **header_ptr, PATH *requested_path, long long int *ref_time, HTTP_VERSION *version)
 {
     if (strncmp(*header_ptr, "GET ", 4) != 0) {
         return ERR_BAD_METHOD;
@@ -75,8 +82,13 @@ parse_request_line(char **header_ptr, PATH *requested_path, long long int *ref_t
         return ERR_BAD_PATH;
     }
 
-    if (strncmp(*header_ptr, "HTTP/1.1\r\n", 10) == 0 || strncmp(*header_ptr, "HTTP/1.0\r\n", 10) == 0) {
+    if (strncmp(*header_ptr, "HTTP/1.1\r\n", 10) == 0) {
         *header_ptr = &((*header_ptr)[9]);
+        *version = HTTP11;
+        return SUCCESS;
+    } else if (strncmp(*header_ptr, "HTTP/1.0\r\n", 10) == 0) {
+        *header_ptr = &((*header_ptr)[9]);
+        *version = HTTP10;
         return SUCCESS;
     } else {
         return ERR_BAD_VERSION;
@@ -260,17 +272,30 @@ sys_com_to_stdin(char *command)
 }
 
 void
-terminate_handler() {
+terminate_handler()
+{
     terminate = true;
 }
 
 void
-unexpectedly_closed_handler() {
+unexpectedly_closed_handler()
+{
     fprintf(stderr, "WARNING: client closed connection unexpectedly\n");
 }
 
+bool
+is_keep_alive(char *header)
+{
+    char *field = NULL;
+    int field_len = 0;
+
+    field = get_header_field_content(header, "Connection", &field_len);
+    IF_RET(field_len == 0, false);
+    return (strncmp(field, "keep-alive", field_len) == 0);
+}
+
 SERVER_ERR
-server_client(int client_fd, int in_fd)
+serve_client(int client_fd, int in_fd)
 {
     char *cpu_name = NULL, *header = NULL, *hostname = NULL, *cpu_load = NULL, *host = NULL, *header_start = NULL;
     buffer response_header, response_payload, response_header_fields, whole_response_buf;
@@ -280,6 +305,8 @@ server_client(int client_fd, int in_fd)
     RESPONSE_TYPE response_type = TYPE_TEXT_PLAIN;
     int host_len = 0;
     ssize_t writen_len;
+    bool keep_alive = false;
+    HTTP_VERSION version;
 
     buf_init(&response_header, 64);
     buf_init(&response_payload, 64);
@@ -294,33 +321,39 @@ server_client(int client_fd, int in_fd)
         ret = load_header(client_fd, &header);
         IF_GOTO(ret != SUCCESS, cleanup);
         header_start = header;
-        ret = parse_request_line(&header, &path, &ref_time);
+        ret = parse_request_line(&header, &path, &ref_time, &version);
 
         /* asemble response */
         /* request line is valid, send OK respons with corresponding payload */
         if (ret == SUCCESS) {
             response_type = get_response_type(header);
-            buf_concat(&response_header, OK_HEADER, 0);
+            if (response_type == TYPE_UNSUPPORTED) {
+                buf_concat(&response_header, BAD_TYPE_HEADER, 0);
+            } else {
+                buf_concat(&response_header, OK_HEADER, 0);
 
-            if (path == REQ_HOSTNAME) {
-                get_hostname(&hostname, in_fd, response_type);
-                buf_concat(&response_payload, hostname, 0);
-            } else if (path == REQ_CPU_NAME) {
-                get_cpu_name(&cpu_name, in_fd, response_type);
-                buf_concat(&response_payload, cpu_name, 0);
-            } else if (path == REQ_LOAD) {
-                get_cpu_usage(&cpu_load, in_fd, response_type);
-                buf_concat(&response_payload, cpu_load, 0);
-                if (ref_time >= 0) {
-                    host = get_header_field_content(header, "Host", &host_len);
-                    buf_printf(&response_header_fields, "Refresh: %lli; url=http://", ref_time);
-                    buf_concat(&response_header_fields, host, host_len);
-                    buf_printf(&response_header_fields, "/load?refresh=%lli\r\n", ref_time);
+                if (path == REQ_HOSTNAME) {
+                    get_hostname(&hostname, in_fd, response_type);
+                    buf_concat(&response_payload, hostname, 0);
+                } else if (path == REQ_CPU_NAME) {
+                    get_cpu_name(&cpu_name, in_fd, response_type);
+                    buf_concat(&response_payload, cpu_name, 0);
+                } else if (path == REQ_LOAD) {
+                    get_cpu_usage(&cpu_load, in_fd, response_type);
+                    buf_concat(&response_payload, cpu_load, 0);
+                    if (ref_time >= 0) {
+                        host = get_header_field_content(header, "Host", &host_len);
+                        buf_printf(&response_header_fields, "Refresh: %lli; url=http://", ref_time);
+                        buf_concat(&response_header_fields, host, host_len);
+                        buf_printf(&response_header_fields, "/load?refresh=%lli\r\n", ref_time);
+                    }
                 }
+                if ((keep_alive = is_keep_alive(header))) {
+                    buf_printf(&response_header_fields, "Keep-Alive: timeout=%d\r\n", DEFULT_TIMEOUT);
+                }
+                buf_printf(&response_header_fields, "Content-Type: %s\nContent-Length: %d\r\n\r\n",
+                            RESPONSE_TYPE_STRING[response_type], buf_get_len(&response_payload));
             }
-            buf_printf(&response_header_fields, "Content-Type: %s\nContent-Length: %d\r\n\r\n",
-                        RESPONSE_TYPE_STRING[response_type], buf_get_len(&response_payload));
-
         /* request uses unsupported or unknown method */
         } else if (ret == ERR_BAD_METHOD) {
             buf_concat(&response_header, BAD_REQUEST_HEADER, 0);
@@ -337,11 +370,12 @@ server_client(int client_fd, int in_fd)
         buf_concat(&whole_response_buf, buf_get_data(&response_header_fields), buf_get_len(&response_header_fields));
         buf_concat(&whole_response_buf, buf_get_data(&response_payload), buf_get_len(&response_payload));
 
+        printf("%s", whole_response_buf.data);
         writen_len = write(client_fd, buf_get_data(&whole_response_buf), buf_get_len(&whole_response_buf));
         if (writen_len == -1) {
             ret = ERR_UNABLE_TO_RESPOND;
         } else {
-            ret = SUCCESS;
+            ret = (version == HTTP10 && !keep_alive) ? CLOSE : SUCCESS;
         }
 
         /* free resources */
@@ -465,8 +499,8 @@ main(int argc, char **argv)
                             FD_SET(new_socket, &active_fd_set);
                         /* new request from connected client or timeout */
                         } else {
-                            ret = server_client(i, pipe_fd[0]);
-                            if (ret == ERR_UNABLE_TO_RESPOND) {
+                            ret = serve_client(i, pipe_fd[0]);
+                            if (ret == ERR_UNABLE_TO_RESPOND || ret == CLOSE) {
                                 close(i);
                                 FD_CLR(i, &active_fd_set);
                             }
