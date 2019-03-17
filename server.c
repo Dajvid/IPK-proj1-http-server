@@ -440,8 +440,10 @@ main(int argc, char **argv)
                 for (int i = 0; i < FD_SETSIZE; i++) {
                     if (FD_ISSET(i, &active_fd_set)) {
                         if (timeouted[i]) {
-                            close(i);
-                            FD_CLR(i, &active_fd_set);
+                            if (i != server_socket) {
+                                close(i);
+                                FD_CLR(i, &active_fd_set);
+                            }
                         } else {
                             timeouted[i] = true;
                             timeout.tv_sec = DEFULT_TIMEOUT;
