@@ -1,12 +1,3 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <string.h>
-#include <netinet/in.h>
-#include <unistd.h>
-#include <stdbool.h>
-
 #include "server.h"
 #include "dyn_buffer.h"
 
@@ -25,7 +16,7 @@ get_header_field_content(char *header, char *field, int *length)
     if (found) {
         found = &found[strlen(field) + 3];
         iter = found;
-        while (*iter != '\n') {
+        while (*iter != '\r') {
             (*length)++;
             iter++;
         }
@@ -54,12 +45,8 @@ get_response_type(char *header)
 }
 
 SERVER_ERR
-parse_request_line(char **header_ptr, PATH *requested_path)
+parse_request_line(char **header_ptr, PATH *requested_path, long long int *ref_time)
 {
-    buffer temp;
-
-    buf_init(&temp, 16);
-
     if (strncmp(*header_ptr, "GET ", 4) != 0) {
         return ERR_BAD_METHOD;
     }
@@ -72,15 +59,24 @@ parse_request_line(char **header_ptr, PATH *requested_path)
         *requested_path = REQ_CPU_NAME;
         *header_ptr = &((*header_ptr)[10]);
     } else if (strncmp(*header_ptr, "/load ", 6) == 0) {
+        *ref_time = -1;
         *requested_path = REQ_LOAD;
         *header_ptr = &((*header_ptr)[6]);
+    } else if (strncmp(*header_ptr, "/load?refresh=", 14) == 0) {
+        *requested_path = REQ_LOAD;
+        *header_ptr = &((*header_ptr)[14]);
+        *ref_time = strtoll(*header_ptr, header_ptr, 10);
+        if ((*header_ptr)[0] != ' ') {
+            return ERR_BAD_REQ;
+        }
+        *header_ptr = &((*header_ptr)[1]);
     } else {
         *requested_path = REQ_UNKNOWN;
         return ERR_BAD_PATH;
     }
 
     if (strncmp(*header_ptr, "HTTP/1.1\r\n", 10) == 0 || strncmp(*header_ptr, "HTTP/1.0\r\n", 10) == 0) {
-        *header_ptr = &((*header_ptr)[10]);
+        *header_ptr = &((*header_ptr)[9]);
         return SUCCESS;
     } else {
         return ERR_BAD_VERSION;
@@ -151,11 +147,67 @@ get_hostname(char **res, int fd, RESPONSE_TYPE res_type)
 }
 
 SERVER_ERR
+parse_idle(int fd, long double *idle, long double *non_idle)
+{
+    long double idle_vals[10];
+    SERVER_ERR ret = SUCCESS;
+    char *end_ptr, *idle_line;
+
+    ret = sys_com_to_stdin("head -n 1 /proc/stat | cut -c 6-");
+    IF_RET(ret != SUCCESS, ret);
+    load_result(fd, &idle_line);
+    end_ptr = idle_line;
+
+    for (int i = USER_IDLE; i <= GUEST_NICE_IDLE; i++) {
+        idle_vals[i] = strtold(end_ptr, &end_ptr);
+        if (i != GUEST_NICE_IDLE) {
+            IF_RET(end_ptr[0] != ' ', ERR_INT);
+            end_ptr = &end_ptr[1];
+        } else {
+            IF_RET(end_ptr[0] != '\0', ERR_INT);
+        }
+    }
+
+    *non_idle = idle_vals[USER_IDLE] + idle_vals[NICE_IDLE] + idle_vals[SYSTEM_IDLE] + idle_vals[IRQ_IDLE] + idle_vals[SOFT_IRQ_IDLE] + idle_vals[STEAL_IDLE];
+    *idle = idle_vals[IDLE_IDLE] + idle_vals[IOWAIT_IDLE];
+
+    free(idle_line);
+    return SUCCESS;
+}
+
+SERVER_ERR
+get_cpu_usage(char **res, int fd, RESPONSE_TYPE res_type)
+{
+    SERVER_ERR ret = SUCCESS;
+    long double prev_idle, prev_non_idle, idle, non_idle, usage, totald, idled;
+    buffer output_buf;
+
+    ret = parse_idle(fd, &prev_idle, &prev_non_idle);
+    IF_RET(ret != SUCCESS, ret);
+    sleep(1);
+    ret = parse_idle(fd, &idle, &non_idle);
+    IF_RET(ret != SUCCESS, ret);
+
+    totald = idle + non_idle - prev_idle - prev_non_idle;
+    idled = idle - prev_idle;
+
+    usage = (totald - idled) / totald;
+    buf_init(&output_buf, 16);
+    if (res_type == TYPE_APPLICATION_JSON) {
+        buf_printf(&output_buf, "{\"load\":\"%.2Lf%%\"}", usage);
+    } else {
+        buf_printf(&output_buf, "%.2Lf%%", usage);
+    }
+
+    *res = output_buf.data;
+    return SUCCESS;
+}
+
+SERVER_ERR
 load_header(int fd, char **out)
 {
-    char *end_ptr, *content, loaded, last_loaded = 0;
+    char *end_ptr, *content, loaded = 0, last_loaded = 0;
     int content_lenght = 0;
-    SERVER_ERR ret = SUCCESS;
     buffer header_buf, tmp_buf;
 
     buf_init(&header_buf, 128);
@@ -203,14 +255,20 @@ sys_com_to_stdin(char *command)
     IF_RET(buf_printf(&command_buffer, "%d", pid) != BUF_SUCCESS, ERR_MEM);
     IF_RET(buf_concat(&command_buffer, "/fd/0\n", 0) != BUF_SUCCESS, ERR_MEM);
     system(command_buffer.data);
+    buf_destroy(&command_buffer);
     return SUCCESS;
+}
+
+void terminate_handler() {
+    terminate = true;
 }
 
 int main(int argc, char **argv)
 {
-    int port, server_socket, rc, comm_socket, pipe_fd[2];
+    int port, server_socket, rc, comm_socket, pipe_fd[2], host_len;
+    long long int ref_time;
     unsigned int client_len;
-    char *endptr, *cpu_name, *header, *hostname;
+    char *endptr, *cpu_name, *header, *hostname, *cpu_load, *host, *header_start;
     buffer response_header, response_payload, response_header_fields;
     struct sockaddr_in sa, sa_client;
     PATH path;
@@ -236,7 +294,6 @@ int main(int argc, char **argv)
         perror("ERROR in socket");
         return EXIT_FAILURE;
     }
-    printf("%d\n", port);
     memset((char *)&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -253,24 +310,30 @@ int main(int argc, char **argv)
     buf_init(&response_header, 64);
     buf_init(&response_payload, 64);
     buf_init(&response_header_fields, 64);
+
+    signal(SIGINT, terminate_handler);
     /* busy waiting for client to connect */
-    while (1) {
+    while (!terminate) {
         comm_socket = accept(server_socket, (struct sockaddr *)&sa_client, &client_len);
 
         if (comm_socket > 0) {
             buf_flush(&response_header);
             buf_flush(&response_header_fields);
             buf_flush(&response_payload);
-            // char *hello = "HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 10\n\nIt's alive";
+            hostname = NULL;
+            cpu_name = NULL;
+            cpu_load = NULL;
+            header_start = NULL;
 
             ret = load_header(comm_socket, &header);
-            ret = parse_request_line(&header, &path);
+            header_start = header;
+            ret = parse_request_line(&header, &path, &ref_time);
 
             /* asemble response */
             /* request line is valid, send OK respons with corresponding payload */
             if (ret == SUCCESS) {
                 response_type = get_response_type(header);
-                buf_concat(&response_header, OK_HEADER, strlen(OK_HEADER));
+                buf_concat(&response_header, OK_HEADER, 0);
 
                 if (path == REQ_HOSTNAME) {
                     get_hostname(&hostname, pipe_fd[0], response_type);
@@ -279,29 +342,48 @@ int main(int argc, char **argv)
                     get_cpu_name(&cpu_name, pipe_fd[0], response_type);
                     buf_concat(&response_payload, cpu_name, 0);
                 } else if (path == REQ_LOAD) {
-
+                    get_cpu_usage(&cpu_load, pipe_fd[0], response_type);
+                    buf_concat(&response_payload, cpu_load, 0);
+                    if (ref_time >= 0) {
+                        host = get_header_field_content(header, "Host", &host_len);
+                        buf_printf(&response_header_fields, "Refresh: %lli; url=http://", ref_time);
+                        buf_concat(&response_header_fields, host, host_len);
+                        buf_printf(&response_header_fields, "/load?refresh=%lli\r\n", ref_time);
+                    }
                 }
-                buf_printf(&response_header_fields, "Content-Type: %s\nContent-Length: %d\n\n",
+                buf_printf(&response_header_fields, "Content-Type: %s\nContent-Length: %d\r\n\r\n",
                            RESPONSE_TYPE_STRING[response_type], buf_get_len(&response_payload));
 
             /* request uses unsupported or unknown method */
             } else if (ret == ERR_BAD_METHOD) {
-                buf_concat(&response_header, BAD_REQUEST_HEADER, strlen(BAD_REQUEST_HEADER));
+                buf_concat(&response_header, BAD_REQUEST_HEADER, 0);
 
             /* request requires invalid path */
             } else if (ret == ERR_BAD_PATH) {
-                buf_concat(&response_header, NOT_FOUND_HEADER, strlen(NOT_FOUND_HEADER));
+                buf_concat(&response_header, NOT_FOUND_HEADER, 0);
             } else if (ret == ERR_BAD_REQ || ret == ERR_BAD_REQ) {
-                buf_concat(&response_header, BAD_REQUEST_HEADER, strlen(BAD_REQUEST_HEADER));
+                buf_concat(&response_header, BAD_REQUEST_HEADER, 0);
             }
 
             /* send response */
             write(comm_socket, buf_get_data(&response_header), buf_get_len(&response_header));
             write(comm_socket, buf_get_data(&response_header_fields), buf_get_len(&response_header_fields));
             write(comm_socket, buf_get_data(&response_payload), buf_get_len(&response_payload));
+
+            /* free resources */
+            free(header_start);
+            free(hostname);
+            free(cpu_name);
+            free(cpu_load);
         }
         close(comm_socket);
     }
+    close(pipe_fd[1]);
+    close(pipe_fd[0]);
+    close(server_socket);
+    buf_destroy(&response_header);
+    buf_destroy(&response_header_fields);
+    buf_destroy(&response_payload);
 
     return EXIT_SUCCESS;
 }

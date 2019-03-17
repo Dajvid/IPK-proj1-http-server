@@ -1,11 +1,19 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <string.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <signal.h>
 
 /* enumeration of server error codes */
 typedef enum {
     SUCCESS = EXIT_SUCCESS,                /**< Operation was succesful */
     ERR_MEM,                               /**< Error in memory allocation */
-    ERR_INT = EXIT_FAILURE,                /**< Internal error */
+    ERR_INT,                                /**< Internal error */
     ERR_BAD_REQ,                           /**< Invalid request */
     ERR_BAD_METHOD,                        /**< Unsupported or unknown request method */
     ERR_BAD_VERSION,                       /**< Unknown HTTP version */
@@ -28,6 +36,21 @@ typedef enum {
     REQ_CPU_NAME,                          /**< CPU name should be returned */
     REQ_LOAD,                              /**< CPU load should be returned */
 } PATH;
+
+bool volatile terminate = false;
+
+typedef enum {
+    USER_IDLE               = 0,
+    NICE_IDLE               = 1,
+    SYSTEM_IDLE             = 2,
+    IDLE_IDLE               = 3,
+    IOWAIT_IDLE             = 4,
+    IRQ_IDLE                = 5,
+    SOFT_IRQ_IDLE           = 6,
+    STEAL_IDLE              = 7,
+    GUEST_IDLE              = 8,
+    GUEST_NICE_IDLE         = 9,
+} IDLE_NAMES;
 
 #define NOT_FOUND_HEADER "HTTP/1.1 404 Not Found\n\n"
 #define BAD_REQUEST_HEADER "HTTP/1.1 400 Bad Request\n\n"
